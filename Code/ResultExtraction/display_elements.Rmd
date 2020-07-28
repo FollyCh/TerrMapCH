@@ -1,0 +1,330 @@
+---
+title: "Display elements article on terrestrial radiation map"
+author: "Folly Christophe"
+date: "13 5 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load packages, results=F, warning=FALSE, message=FALSE, include=FALSE}
+library(INLA)
+library(Metrics)
+library(fields)
+library(tidyverse)
+library(ggplot2)
+library(scoringRules)
+library(knitr)
+library(gstat)
+library(sp)
+library(MatrixModels)
+library(tmap)
+library(tmaptools)
+library(viridis)
+library(sf)
+library(stars)
+```
+
+## Introduction
+
+The purpose of this script is to compute the display elements for use in the article on the terrestrial radiation.
+
+Some can be directly exported, some will need modification in PowerPoint or directly in LaTeX.
+
+## Numbers
+
+### Number of measurements
+
+Number of measurements in total `r nrow(readRDS("../Data/processed/aero_data.rds"))`. 
+
+After cleaning, we have `r nrow(readRDS("../Data/processed/aero_data_clean.rds"))`.
+
+Every 15th, we include `r nrow(readRDS("../_15_noflight/Input/aero_cluster.rds"))`.
+
+### Global statistics
+
+The mean after data cleaning is `r mean(readRDS("../Data/processed/aero_data_clean.rds")$TERR)`.
+
+The median after data cleaning is `r median(readRDS("../Data/processed/aero_data_clean.rds")$TERR)`.
+
+
+## Figures
+
+### Flight path
+
+```{r load_data}
+aero_15 <- readRDS("../_15_noflight/Input/aero_cluster.rds")
+aero_cleaned <- readRDS("../Data/processed/aero_data_clean.rds")
+library(OpenStreetMap)
+CH_canton <- as(st_read("C:/Users/folly/Desktop/Homeoffice/Geo_Political/gg2019/ggg_2019-LV03/shp/k4l19.shp"),"Spatial")
+CH_lakes <- as(st_read("C:/Users/folly/Desktop/Homeoffice/Geo_Political/gg2019/ggg_2019-LV03/shp/k4s19.shp"),"Spatial")
+
+
+# buffer Mühleberg
+df <- c("Mühleberg KKW", 587100, 202000) #over cheminee
+df <- rbind(df, c("Leibstadt KKW", 655850, 272350)) #over cheminee
+df <- as.data.frame(df)
+names(df) <- c("Site", "X","Y")
+df$X <- as.numeric(as.character(df$X))
+df$Y <- as.numeric(as.character(df$Y))
+coordinates(df) <- ~X+Y
+proj4string(df) <- proj4string(CH_canton)
+exc_buffer <- st_buffer(st_as_sf(df), 500)
+
+#flight path
+exampleflight <- aero_cleaned[aero_cleaned$Flight %in% c("KKM_rekonstRe-eval"),]
+temp_bg <- read_osm(exampleflight, ext=1.02)
+tm_shape(temp_bg) + tm_rgb() + 
+  tm_shape(exampleflight) + tm_dots(col = "red", legend.show = F) +
+  tm_layout(frame = F, bg.color = "transparent") + 
+  tm_shape(exc_buffer[1,])+tm_borders(col = "blue")
+flightpath <- tm_shape(temp_bg) + tm_rgb() + 
+  tm_shape(exampleflight) + tm_dots(col = "red", legend.show = F) +
+  tm_layout(frame = F, bg.color = "transparent")+ 
+  tm_shape(exc_buffer[1,])+tm_borders(col = "blue")
+tmap_save(flightpath, "flightpath.jpg")
+
+```
+
+
+### Coverage with flights and spCV folds
+
+```{r plot_spCV}
+spCV <- readRDS("../_15_noflight/spCV_object.rds")
+#rescale coords
+aero_15$X <- aero_15$X*1000
+aero_15$Y <- aero_15$Y*1000
+coordinates(aero_15) <- ~X+Y
+proj4string(aero_15) <- proj4string(CH_canton)
+# get box of example flight
+
+temp_box <- st_polygon(list(as.matrix(rbind(c(st_bbox(temp_bg)[1],st_bbox(temp_bg)[2]),
+                 c(st_bbox(temp_bg)[1],st_bbox(temp_bg)[4]),
+                 c(st_bbox(temp_bg)[3],st_bbox(temp_bg)[4]),
+                 c(st_bbox(temp_bg)[3],st_bbox(temp_bg)[2]),
+                 c(st_bbox(temp_bg)[1],st_bbox(temp_bg)[2])))))
+temp_box <- st_sf(st_sfc(temp_box), crs = st_crs(temp_bg))
+temp_box$text <- "Figure 2" 
+
+#plot
+tm_shape(aero_15) + 
+  tm_dots(col = "fold",legend.show = FALSE,palette = viridisLite::viridis(4))+
+  tm_layout(frame=F,bg.color = "transparent", legend.text.size = 1.2, legend.title.size = 1.4)+
+  tm_add_legend(type = "fill", col = viridisLite::viridis(4), labels = c("1","2","3","4"), title = "Fold") + 
+  tm_shape(spCV$blocks) + tm_borders(col = "red", alpha = 0.2) + 
+  tm_shape(CH_canton) + tm_borders(col = "slategrey") +
+  tm_shape(CH_lakes) + tm_fill(col = "cadetblue1",alpha = 0.4) +
+  tm_shape(temp_box) + tm_borders(col = "red",lwd = 2) + 
+  tm_text(text = "text", col ="red",xmod = 2.5,ymod = -1.1,size=1.4)
+
+# save
+displ_folds <- tm_shape(aero_15) + 
+  tm_dots(col = "fold",legend.show = FALSE,palette = viridisLite::viridis(4))+
+  tm_layout(frame=F,bg.color = "transparent", legend.text.size = 1.2, legend.title.size = 1.4)+
+  tm_add_legend(type = "fill", col = viridisLite::viridis(4), labels = c("1","2","3","4"), title = "Fold") + 
+  tm_shape(spCV$blocks) + tm_borders(col = "red", alpha = 0.2) + 
+  tm_shape(CH_canton) + tm_borders(col = "slategrey") +
+  tm_shape(CH_lakes) + tm_fill(col = "cadetblue1",alpha = 0.4)+
+  tm_shape(temp_box) + tm_borders(col = "red",lwd = 2) + 
+  tm_text(text = "text", col ="red",xmod = 2.5,ymod = -1.1,size=1.4)
+tmap_save(tm = displ_folds,filename = "folds_cv.png")
+
+```
+
+### Maps mixed-effects and extended mixed-effects
+
+```{r plot_predictions}
+grid_lm <- readRDS("../_15_noflight/Model_LM_inla/Output/grid_results.rds")
+grid_me <- readRDS("../_15_noflight/Model_standard/Output/grid_results.rds")
+grid_ex <- readRDS("../_15_noflight/Model_extended_priors/Main/Output/grid_results.rds")
+grid_sp <- readRDS("../_15_noflight/Model_SPDE/Output/grid_results.rds")
+
+# use quilt plot - save plots manually
+quilt.plot(grid_lm$X,grid_lm$Y, grid_lm$mean,nx=300,ny=200,asp=1, nlevel=80, main = "Mean of Prediction",axes=FALSE)
+quilt.plot(grid_me$X,grid_me$Y, grid_me$mean,nx=300,ny=200,asp=1, nlevel=80, main = "Mean of Prediction",axes=FALSE)
+quilt.plot(grid_ex$X,grid_ex$Y, grid_ex$mean,nx=300,ny=200,asp=1, nlevel=80, main = "Mean of Prediction",axes=FALSE)
+quilt.plot(grid_sp$X,grid_sp$Y, grid_sp$mean,nx=300,ny=200,asp=1, nlevel=80, main = "Mean of Prediction",axes=FALSE)
+
+
+# same for standard deviation
+quilt.plot(grid_lm$X,grid_lm$Y, grid_lm$sd,nx=300,ny=200,asp=1, nlevel=80, main = "Standard Error of Prediction",axes=FALSE)
+quilt.plot(grid_me$X,grid_me$Y, grid_me$sd,nx=300,ny=200,asp=1, nlevel=80, main = "Standard Error of Prediction",axes=FALSE)
+quilt.plot(grid_ex$X,grid_ex$Y, grid_ex$sd,nx=300,ny=200,asp=1, nlevel=80, main = "Standard Error of Prediction",axes=FALSE)
+quilt.plot(grid_sp$X,grid_sp$Y, grid_sp$sd,nx=300,ny=200,asp=1, nlevel=80, main = "Standard Error of Prediction",axes=FALSE)
+
+# Combine maps with PowerPoint into single picture
+# Add additional infos there
+```
+
+### Combined map using ggplot
+
+```{r comb_map}
+#combine data
+grid_ex$mean_lm <- grid_lm$mean
+grid_ex$sd_lm <- grid_lm$sd
+grid_ex$mean_sp <- grid_sp$mean
+grid_ex$sd_sp <- grid_sp$sd
+grid_ex$mean_me <- grid_me$mean
+grid_ex$sd_me <- grid_me$sd
+
+# prepare to go spatial
+grid <- grid_ex
+grid$ID <- 1:nrow(grid)
+grid$X <- 1000 * grid$X
+grid$Y <- 1000 * grid$Y
+
+
+
+
+```
+
+### Fitted versus measured
+
+```{r plot_fitvsmeas}
+aero_lm <- readRDS("../_15_noflight/Model_LM_inla/Output/aero_results.rds")
+aero_me <- readRDS("../_15_noflight/Model_standard/Output/aero_results.rds")
+aero_ex <- readRDS("../_15_noflight/Model_extended_priors/Main/Output/aero_results.rds")
+
+#plot only for extended
+ggplot(aero_ex, aes(x=exp(mean), y=TERR)) + geom_point(col = "black", alpha=0.1) + geom_abline(slope=1, intercept = 0,col="blue",size=1.2) + coord_fixed(ratio=1) + theme_minimal()+xlab("Predicted mean")+ylab("Measured")+ggtitle("Predicted vs. Measured")
+
+# save
+predvsmeas <- ggplot(aero_ex, aes(x=exp(mean), y=TERR)) + geom_point(col = "black", alpha=0.1) + geom_abline(slope=1, intercept = 0,col="blue",size=1.2) + coord_fixed(ratio=1) + theme_minimal()+xlab("Predicted mean [nSv/h]")+ylab("Measured [nSv/h]")
+ggsave(predvsmeas, filename = "pred_vs_meas.jpg", dpi = "print")
+
+```
+
+### Fitted versus measured - normalized
+
+```{r fitt_vs_meas2}
+# how well is measured in predicted intervall?
+# i will do: (LogTerr - mean.pred)/sd.pred
+# ideally, this should follow a standard normal
+aero_ex$norm <- (aero_ex$LogTerr - aero_ex$mean)/aero_ex$sd
+plot(density(aero_ex$norm))
+
+# I plot it against the predicted value and add ablines for the 95% intervall at 1.96
+ggplot(aero_ex, aes(x=exp(mean), y=norm)) + geom_density_2d() +
+  geom_abline(slope=0, intercept = 0,col="blue",size=1.2) +
+  geom_abline(slope=0, intercept = -1.96,col="red",size=1) +
+  geom_abline(slope=0, intercept = 1.96,col="red",size=1) +
+  coord_fixed(ratio=1) + theme_minimal()+xlab("Predicted mean")+ylab("Residual/Sd of Prediction")+ggtitle("Density Plot predictions vs. normalized residuals")
+
+# would be interesting to see density along x axis-- not sure how to best do...
+# (sort of coverage probability by measured levels..)
+```
+
+
+
+### Maps of covariates
+
+```{r covariate maps}
+grid_ex$Preds <- exp(grid_ex$mean)
+quilt.plot(grid_ex$X,grid_ex$Y, ifelse(grid_ex$Preds > 40,grid_ex$Preds,40),nx=300,ny=200,asp=1, nlevel=80, main = "Mean of Prediction",axes=FALSE) #screen values lower than 40nSv/h to enhance contrast?
+
+
+grid_ex$Y <- grid_ex$Y*1000
+grid_ex$X <- grid_ex$X*1000
+coordinates(grid_ex) <- ~X+Y
+proj4string(grid_ex) <- proj4string(CH_canton)
+gridded(grid_ex) <-TRUE
+
+tm_shape(CH_canton) + tm_borders(col = "slategrey") +
+  tm_shape(CH_lakes) + tm_fill(col = "cadetblue1",alpha=0.4)+
+  tm_shape(grid_ex) + tm_raster(col = "Preds", palette = "-plasma" ,style="cont",title = "Terrestrial Radiation [nSv/h]")+
+  tm_layout(frame=FALSE, legend.text.size = 1.2, legend.title.size = 2)
+
+terrmap <- tm_shape(CH_canton) + tm_borders(col = "slategrey") +
+  tm_shape(CH_lakes) + tm_fill(col = "cadetblue1",alpha=0.4)+
+  tm_shape(grid_ex) + tm_raster(col = "Preds", palette = "-plasma" ,style="cont",title = "Terrestrial Radiation [nSv/h]")+
+  tm_layout(frame=FALSE, legend.text.size = 1.2, legend.title.size = 2 ,bg.color = "transparent") 
+tmap_save(terrmap, "map_terrRad.jpg")
+
+# Lithology
+tm_shape(grid_ex) + tm_raster(col = "GESTEINKL", title = "Lithology") +
+  tm_layout(legend.outside = TRUE, frame = FALSE, legend.text.size = 0.86, legend.title.size = 1.3)
+Litho <- tm_shape(grid_ex) + tm_raster(col = "GESTEINKL", title = "Lithology") +
+  tm_layout(legend.outside = TRUE, frame = FALSE, legend.text.size = 0.86, legend.title.size = 1.3)
+tmap_save(Litho, "lithology.jpg")
+
+# Tectonics
+tm_shape(grid_ex) + tm_raster(col = "LEG_TEK_1", title = "Tectonic units") +
+  tm_layout(legend.outside = TRUE, frame = FALSE, legend.title.size = 1.3)
+Tecto <- tm_shape(grid_ex) + tm_raster(col = "LEG_TEK_1", title = "Tectonic units") +
+  tm_layout(legend.outside = TRUE, frame = FALSE, legend.title.size = 1.3)
+tmap_save(Tecto, "tectonics.jpg")
+
+# Land cover
+tm_shape(grid_ex) + tm_raster(col = "LC09_6", title = "Land coverage") +
+  tm_layout(legend.outside = TRUE, frame = FALSE, legend.title.size = 1.3, legend.text.size = 1.2)
+LC <- tm_shape(grid_ex) + tm_raster(col = "LC09_6", title = "Land coverage") +
+  tm_layout(legend.outside = TRUE, frame = FALSE, legend.title.size = 1.3, legend.text.size = 1.2)
+tmap_save(LC, "landcover.jpg")
+
+# rain fall
+ScaleRain <- readRDS("../_15_noflight/Input/SCALE_rain.rds")
+grid_ex$rain <- grid_ex$rain*ScaleRain
+tm_shape(grid_ex) + tm_raster(col = "rain", title = "Cumulative rainfall [mm]", style = "cont") +
+  tm_layout(legend.outside = TRUE, frame = FALSE, legend.title.size = 1.5, legend.text.size = 1.1)
+rainfall <- tm_shape(grid_ex) + tm_raster(col = "rain", title = "Cumulative rainfall [mm]", style = "cont") +
+  tm_layout(legend.outside = TRUE, frame = FALSE, legend.title.size = 1.5, legend.text.size = 1.1)
+tmap_save(rainfall, "rainfall.jpg")
+
+
+
+
+```
+
+### Variogram - Directional variogram
+
+```{r plot_vrgs}
+aero_cleaned$rain <- (aero_cleaned$Rain_april30 + aero_cleaned$Rain_may1 + aero_cleaned$Rain_may2 + aero_cleaned$Rain_may3 + aero_cleaned$Rain_may4 + aero_cleaned$Rain_may5)/1000
+vrg <- variogram(TERR ~ GESTEINKL + LEG_TEK_1 + LC09_6 + rain, data = aero_cleaned[sample(1:nrow(aero_cleaned),100000),], 
+                 boundaries = c(500,1000,1500,2000,2500,3000,4000,5000,6000,7000,8000,10000,12000,15000,18000,21000,24000,27000,30000,35000))
+plot(vrg, xlab = "Distance [m]", ylab = expression(paste('Semivariance [(nSv/h) '^2,' ]',sep='')))
+```
+
+### Mesh u_1
+
+Which mesh to do? I use the coarse mesh used to fit the extended model as example.
+
+```{r exmaplemesh}
+mesh <- readRDS("../_15_noflight/Model_extended_priors/Output/mesh_u1.rds")
+plot(mesh)
+# adapt title etc in PowerPoint
+plot(mesh)
+points(aero_ex$X,aero_ex$Y, col = "red")
+```
+
+### Distribution Measurements - Predictions
+
+Compare distribution of measurements versus distribution of values predicted on map.
+
+```{r distribution}
+grid_ex <- readRDS("../_15_noflight/Model_extended_priors/Main/Output/grid_results.rds")
+
+plot(density(exp(grid_ex$mean)), col = "black", lwd=2, xlab="Terrestrial Radiation [nSv/h]", main = "", bty = "n", cex.lab  = 1.4)
+grid()
+```
+
+
+## Tables
+
+### Fitted hyperparameters
+
+see compare iter and extract_results scripts.
+
+### Performances
+
+see extract results and comereiter scripts for numbers.
+
+### Fitted hyperparameters Sensitivity Analysis
+
+See file sensitivity analysis.
+
+### Performances Sensitivity Analysis
+
+See file sensitivity analysis.
+

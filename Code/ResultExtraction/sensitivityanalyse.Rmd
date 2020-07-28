@@ -1,0 +1,289 @@
+---
+title: "Compare Fitting methods"
+author: "Folly Christophe"
+date: "29 4 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load packages, results=F, warning=FALSE, message=FALSE, include=FALSE}
+library(INLA)
+library(Metrics)
+library(fields)
+library(tidyverse)
+library(ggplot2)
+library(scoringRules)
+library(knitr)
+library(gstat)
+library(sp)
+library(MatrixModels)
+library(tmap)
+```
+
+
+
+## Introduction
+
+The aim of this script is to provide an overview on the results of the sensititvity analysis. 
+
+I recomputed the model to conduct sensitivity analysis with respect to the thinning out and with respect to the chosen mesh. The main results were obtained by sampling every 15th measurement into the training set, sensitivity is done for every tenth and every 15th measurement.
+
+For the mesh I both compute models based on denser and less dense meshs than the main model.
+
+Here I now compare the resulting maps as well as the fitted coefficients and hyperparameter. I will also compute the performance measures.
+
+
+## Predicted Map
+
+```{r read_data}
+map_model <- readRDS("../Model_extended_priors/Output/grid_results.rds")
+sens_meshsmall <- readRDS("../Model_extended_priors_sensitivity_meshsmall/Output/grid_results.rds")
+sens_meshlarge <- readRDS("../Model_extended_priors_sensitivity_meshlarge/Output/grid_results.rds")
+sens_10 <- readRDS("../Model_extended_priors_sensitivity_thinn10/Output/grid_results.rds")
+sens_20 <- readRDS("../Model_extended_priors_sensitivity_thinn20/Output/grid_results.rds")
+```
+
+I start by plotting the resulting maps:
+
+```{r plot_maps}
+quilt.plot(map_model$X,map_model$Y,map_model$mean, nx=300,ny=200,nlevel=30, asp=1, main="Informative Priors")
+quilt.plot(sens_10$X,sens_10$Y,sens_10$mean, nx=300,ny=200,nlevel=30, asp=1, main="thinn out 10th")
+quilt.plot(sens_20$X,sens_20$Y,sens_20$mean, nx=300,ny=200,nlevel=30, asp=1, main="thinn out 20th")
+quilt.plot(sens_meshlarge$X,sens_meshlarge$Y,sens_meshlarge$mean, nx=300,ny=200,nlevel=30, asp=1, main="less dense mesh")
+quilt.plot(sens_meshsmall$X,sens_meshsmall$Y,sens_meshsmall$mean, nx=300,ny=200,nlevel=30, asp=1, main="more dense mesh")
+```
+
+The maps look relatively similar, how well is the correlation between them?
+
+```{r correlation}
+cor(map_model$mean, sens_10$mean)^2
+cor(map_model$mean, sens_20$mean)^2
+cor(map_model$mean, sens_meshlarge$mean)^2
+cor(map_model$mean, sens_meshsmall$mean)^2
+```
+
+While for the thinning out, the correlation ($R^{2}$) is for both directions between 0.96 and 0.97, it is above 0.99 for the analyses with changed mesh size.
+
+Let us look at the predictive uncertainty:
+
+```{r plot_unc}
+quilt.plot(map_model$X,map_model$Y,map_model$sd, nx=300,ny=200,nlevel=30, asp=1, main="Informative Priors")
+quilt.plot(sens_10$X,sens_10$Y,sens_10$sd, nx=300,ny=200,nlevel=30, asp=1, main="thinn out 10th")
+quilt.plot(sens_20$X,sens_20$Y,sens_20$sd, nx=300,ny=200,nlevel=30, asp=1, main="thinn out 20th")
+quilt.plot(sens_meshlarge$X,sens_meshlarge$Y,sens_meshlarge$sd, nx=300,ny=200,nlevel=30, asp=1, main="less dense mesh")
+quilt.plot(sens_meshsmall$X,sens_meshsmall$Y,sens_meshsmall$sd, nx=300,ny=200,nlevel=30, asp=1, main="more dense mesh")
+```
+
+Differences indicate that the fitted range could be influenced.
+
+
+## Fitted Coefficients and hyperparameters
+
+```{r load_fittedcoeffs}
+res_model <- readRDS("../Model_extended_priors/Output/results.rds")
+res_10 <- readRDS("../Model_extended_priors_sensitivity_thinn10/Output/results.rds")
+res_20 <- readRDS("../Model_extended_priors_sensitivity_thinn20/Output/results.rds")
+res_large <- readRDS("../Model_extended_priors_sensitivity_meshlarge/Output/results.rds")
+res_small <- readRDS("../Model_extended_priors_sensitivity_meshsmall/Output/results.rds")
+```
+
+I first compare the fitted coefficients:
+
+```{r compare_coeffs}
+coeffs <- data.frame("prior" = res_model$summary.fixed$mean,
+                        "thin10" = res_10$summary.fixed$mean,
+                        "thin20" = res_20$summary.fixed$mean,
+                        "large" = res_large$summary.fixed$mean,
+                        "small" = res_small$summary.fixed$mean)
+coeffs$name <- as.vector(rownames(res_model$summary.fixed))
+coeffs <- gather(coeffs, key = "method", value = "coefficient",-c("name"))
+ggplot(coeffs, aes(x = name, y = coefficient, col = method))+geom_point()+coord_flip()
+```
+
+Some differences, most pronounced for the coefficient for the rainfall after Chernobyl (NB due to the preparation of the data, for the thinning out there was a different scaling used which could explain partly the variance (but the difference should be small...)). And the hyperparameters?
+
+```{r hyperpars}
+hyperpars <- data.frame("prior" = res_model$summary.hyperpar$mean,
+                        "thin10" = res_10$summary.hyperpar$mean,
+                        "thin20" = res_20$summary.hyperpar$mean,
+                        "large" = res_large$summary.hyperpar$mean,
+                        "small" = res_small$summary.hyperpar$mean)
+hyperpars$name <- as.vector(rownames(res_model$summary.hyperpar))
+kable(hyperpars)
+
+```
+
+We can observe some differences, it is surprising that the fitted range is consistently larger for the long range field in any direction of the sensitivity analysis.
+
+## Model Performances
+
+```{r model_perf, echo = F,results=T}
+performances <- data.frame(t(rep(NA,8)))
+names(performances) <- c("model", "RMSEtrain","RMSErCV","RMSEspCV","R2train","R2rCV","R2spCV","CRPSspCV")
+
+###### 
+
+#load informative prior
+grid <- readRDS("../Model_extended_priors/Output/grid_results.rds")
+fit <- readRDS("../Model_extended_priors/Output/aero_results.rds")
+validr <- readRDS("../Model_extended_priors/CVr/Output/valid_results_cvr.rds") 
+valid1 <- readRDS("../Model_extended_priors/CV1/Output/valid_results_cv1.rds")
+valid2 <- readRDS("../Model_extended_priors/CV2/Output/valid_results_cv2.rds")
+valid3 <- readRDS("../Model_extended_priors/CV3/Output/valid_results_cv3.rds")
+valid4 <- readRDS("../Model_extended_priors/CV4/Output/valid_results_cv4.rds")
+valid <- rbind(valid1,valid2,valid3,valid4)
+valid$pred <- valid$mean
+valid$sd <- valid$sd
+validr$pred <- validr$mean
+validr$sd <- validr$sd
+
+# performance iterative
+RMSEtrain <- rmse(actual = fit$TERR, predicted = exp(fit$mean))
+RMSErCV <- rmse(actual = validr$TERR, predicted = exp(validr$pred))
+RMSEspCV <- rmse(actual = valid$TERR,
+                 predicted = exp(valid$pred))
+R2train <- cor(fit$TERR, exp(fit$mean))^2
+R2rCV <- cor(validr$TERR, exp(validr$pred))^2
+R2spCV <- cor(valid$TERR,exp(valid$pred))^2
+CRPSspCV <- mean(crps(y = valid$LogTerr, family = "normal", mean = valid$pred, sd = valid$sd)) #on log-scale 
+
+# Add to data
+performances[1,] <- c("priors", RMSEtrain,RMSErCV,RMSEspCV,R2train,R2rCV,R2spCV,CRPSspCV)
+
+###### 
+
+#load thin10
+grid <- readRDS("../Model_extended_priors_sensitivity_thinn10/Output/grid_results.rds")
+fit <- readRDS("../Model_extended_priors_sensitivity_thinn10/Output/aero_results.rds")
+validr <- readRDS("../Model_extended_priors_sensitivity_thinn10/CVr/Output/valid_results_cvr.rds") 
+valid1 <- readRDS("../Model_extended_priors_sensitivity_thinn10/CV1/Output/valid_results_cv1.rds")
+valid2 <- readRDS("../Model_extended_priors_sensitivity_thinn10/CV2/Output/valid_results_cv2.rds")
+valid3 <- readRDS("../Model_extended_priors_sensitivity_thinn10/CV3/Output/valid_results_cv3.rds")
+valid4 <- readRDS("../Model_extended_priors_sensitivity_thinn10/CV4/Output/valid_results_cv4.rds")
+valid <- rbind(valid1,valid2,valid3,valid4)
+valid$pred <- valid$mean
+valid$sd <- valid$sd
+validr$pred <- validr$mean
+validr$sd <- validr$sd
+
+# performance iterative
+RMSEtrain <- rmse(actual = fit$TERR, predicted = exp(fit$mean))
+RMSErCV <- rmse(actual = validr$TERR, predicted = exp(validr$pred))
+RMSEspCV <- rmse(actual = valid$TERR,
+                 predicted = exp(valid$pred))
+R2train <- cor(fit$TERR, exp(fit$mean))^2
+R2rCV <- cor(validr$TERR, exp(validr$pred))^2
+R2spCV <- cor(valid$TERR,exp(valid$pred))^2
+CRPSspCV <- mean(crps(y = valid$LogTerr, family = "normal", mean = valid$pred, sd = valid$sd)) #on log-scale 
+
+# Add to data
+performances[2,] <- c("thinn10", RMSEtrain,RMSErCV,RMSEspCV,R2train,R2rCV,R2spCV,CRPSspCV)
+
+###### 
+
+#load thin20
+grid <- readRDS("../Model_extended_priors_sensitivity_thinn20/Output/grid_results.rds")
+fit <- readRDS("../Model_extended_priors_sensitivity_thinn20/Output/aero_results.rds")
+validr <- readRDS("../Model_extended_priors_sensitivity_thinn20/CVr/Output/valid_results_cvr.rds") 
+valid1 <- readRDS("../Model_extended_priors_sensitivity_thinn20/CV1/Output/valid_results_cv1.rds")
+valid2 <- readRDS("../Model_extended_priors_sensitivity_thinn20/CV2/Output/valid_results_cv2.rds")
+valid3 <- readRDS("../Model_extended_priors_sensitivity_thinn20/CV3/Output/valid_results_cv3.rds")
+valid4 <- readRDS("../Model_extended_priors_sensitivity_thinn20/CV4/Output/valid_results_cv4.rds")
+valid <- rbind(valid1,valid2,valid3,valid4)
+valid$pred <- valid$mean
+valid$sd <- valid$sd
+validr$pred <- validr$mean
+validr$sd <- validr$sd
+
+# performance iterative
+RMSEtrain <- rmse(actual = fit$TERR, predicted = exp(fit$mean))
+RMSErCV <- rmse(actual = validr$TERR, predicted = exp(validr$pred))
+RMSEspCV <- rmse(actual = valid$TERR,
+                 predicted = exp(valid$pred))
+R2train <- cor(fit$TERR, exp(fit$mean))^2
+R2rCV <- cor(validr$TERR, exp(validr$pred))^2
+R2spCV <- cor(valid$TERR,exp(valid$pred))^2
+CRPSspCV <- mean(crps(y = valid$LogTerr, family = "normal", mean = valid$pred, sd = valid$sd)) #on log-scale 
+
+# Add to data
+performances[3,] <- c("thinn20", RMSEtrain,RMSErCV,RMSEspCV,R2train,R2rCV,R2spCV,CRPSspCV)
+
+###### 
+
+#load meshlarge
+grid <- readRDS("../Model_extended_priors_sensitivity_meshlarge/Output/grid_results.rds")
+fit <- readRDS("../Model_extended_priors_sensitivity_meshlarge/Output/aero_results.rds")
+validr <- readRDS("../Model_extended_priors_sensitivity_meshlarge/CVr/Output/valid_results_cvr.rds") 
+valid1 <- readRDS("../Model_extended_priors_sensitivity_meshlarge/CV1/Output/valid_results_cv1.rds")
+valid2 <- readRDS("../Model_extended_priors_sensitivity_meshlarge/CV2/Output/valid_results_cv2.rds")
+valid3 <- readRDS("../Model_extended_priors_sensitivity_meshlarge/CV3/Output/valid_results_cv3.rds")
+valid4 <- readRDS("../Model_extended_priors_sensitivity_meshlarge/CV4/Output/valid_results_cv4.rds")
+valid <- rbind(valid1,valid2,valid3,valid4)
+valid$pred <- valid$mean
+valid$sd <- valid$sd
+validr$pred <- validr$mean
+validr$sd <- validr$sd
+
+# performance iterative
+RMSEtrain <- rmse(actual = fit$TERR, predicted = exp(fit$mean))
+RMSErCV <- rmse(actual = validr$TERR, predicted = exp(validr$pred))
+RMSEspCV <- rmse(actual = valid$TERR,
+                 predicted = exp(valid$pred))
+R2train <- cor(fit$TERR, exp(fit$mean))^2
+R2rCV <- cor(validr$TERR, exp(validr$pred))^2
+R2spCV <- cor(valid$TERR,exp(valid$pred))^2
+CRPSspCV <- mean(crps(y = valid$LogTerr, family = "normal", mean = valid$pred, sd = valid$sd)) #on log-scale 
+
+# Add to data
+performances[4,] <- c("large", RMSEtrain,RMSErCV,RMSEspCV,R2train,R2rCV,R2spCV,CRPSspCV)
+
+###### 
+
+#load meshsmall
+grid <- readRDS("../Model_extended_priors_sensitivity_meshsmall/Output/grid_results.rds")
+fit <- readRDS("../Model_extended_priors_sensitivity_meshsmall/Output/aero_results.rds")
+validr <- readRDS("../Model_extended_priors_sensitivity_meshsmall/CVr/Output/valid_results_cvr.rds") 
+valid1 <- readRDS("../Model_extended_priors_sensitivity_meshsmall/CV1/Output/valid_results_cv1.rds")
+valid2 <- readRDS("../Model_extended_priors_sensitivity_meshsmall/CV2/Output/valid_results_cv2.rds")
+valid3 <- readRDS("../Model_extended_priors_sensitivity_meshsmall/CV3/Output/valid_results_cv3.rds")
+valid4 <- readRDS("../Model_extended_priors_sensitivity_meshsmall/CV4/Output/valid_results_cv4.rds")
+valid <- rbind(valid1,valid2,valid3,valid4)
+valid$pred <- valid$mean
+valid$sd <- valid$sd
+validr$pred <- validr$mean
+validr$sd <- validr$sd
+
+# performance iterative
+RMSEtrain <- rmse(actual = fit$TERR, predicted = exp(fit$mean))
+RMSErCV <- rmse(actual = validr$TERR, predicted = exp(validr$pred))
+RMSEspCV <- rmse(actual = valid$TERR,
+                 predicted = exp(valid$pred))
+R2train <- cor(fit$TERR, exp(fit$mean))^2
+R2rCV <- cor(validr$TERR, exp(validr$pred))^2
+R2spCV <- cor(valid$TERR,exp(valid$pred))^2
+CRPSspCV <- mean(crps(y = valid$LogTerr, family = "normal", mean = valid$pred, sd = valid$sd)) #on log-scale 
+
+# Add to data
+performances[5,] <- c("small", RMSEtrain,RMSErCV,RMSEspCV,R2train,R2rCV,R2spCV,CRPSspCV)
+
+###
+
+# Print table
+kable(performances)
+```
+
+
+Very similar performances across the performaed sensitivity analyses.
+
+## Conclusion
+
+Largely, the predictions remain very similar, with larger sensitivity to changes in the thinning out compared to changes in the density of the mesh.
+
+The most striking differences are observed for the fitted range, with the surprise that the original parameter lead to the smallest estimates for the range.
+
+
+
+

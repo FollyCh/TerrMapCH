@@ -1,0 +1,611 @@
+---
+title: "Results: subset - every 15th"
+author: "Folly Christophe"
+date: "5 M?rz 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load packages, results=F, warning=FALSE, message=FALSE, include=FALSE}
+library(INLA)
+library(Metrics)
+library(fields)
+library(tidyverse)
+library(ggplot2)
+library(scoringRules)
+library(knitr)
+library(gstat)
+library(sp)
+library(MatrixModels)
+```
+
+
+
+## Introduction
+
+The puropse of this script is to collect and summarise the results of the models computed to map terrestrial radiation in CH based on a subset of every 15th measurement.
+
+Models including a spatial term showed weird patterns and extreme extrapollations when fitted to the full dataset. The same, to a lesser extend, was the case when using a random sample of 100000.
+
+I recomputed all models based on 39200 measurements. The data was subsettred by including every 15th measurement.
+
+In the following, I will display some general results of these models and compute various performance measures.  At the end, I will summarise the performance measures in order to compare the models against each other.
+
+All models are computed on logscale, $Y(s) = some model $ with $Y(s)$ denoting $Log(ADR_{terrestrial})$. 
+
+
+## Data
+
+All models are based on the air born $\gamma$-spectrometry measurements provided by Benno Bucher. The measurements are conducted from a helicopter, densely surveying specific areas during measurement flights. This results in areas with a dense coverage as well as large gaps without any measurements.
+
+The measured values that we use for the model represent the ambient dose rate in 1m height stemming from terrestrial radiation. Based on counts of 252 channels a method called SDI is used to compute the ambient dose rates ($ADR$), taking into account influences from radionuclides in the atmossphere. The measurement system is calibrated against in-situ spectrometry measurements on ground. In addition to ambient doserate, the dose rate from cosmic radiation ($ADR_{cosmic}$) is estimated (based on calibration flights). The difference between $ADR$ and $ADR_{cosmic}$ is taken as the contribution of terrestrial radiation to the ambient dose rate. $$ ADR_{terrestrial} = ADR - ADR_{cosmic}$$
+
+### Subset
+
+I here compare the subset to the excluded measurements.
+
+```{r subset, echo = F, results=F,warning=F}
+aero <- readRDS("../Input/aero_cluster.rds")
+aero_all <- readRDS("../Input/excluded_measurements.rds")
+df <- c("measure" = NA,"subset" = NA, "excluded" = NA)
+df[] <- c("mean", mean(aero$TERR),mean(aero_all$TERR))
+df <- rbind(df,c("median", median(aero$TERR),median(aero_all$TERR)))
+df <- rbind(df,c("size", nrow(aero),nrow(aero_all)))
+```
+
+A quick overview:
+```{r subset_over}
+kable(df)
+quantile(c(aero$TERR,aero_all$TERR), probs = c(0,.01,.025,0.05,0.25,0.5,0.75,0.95,.975,.99,1))
+quantile(aero$TERR, probs = c(0,.01,.025,0.05,0.25,0.5,0.75,0.95,.975,.99,1))
+plot(density(aero$TERR), col = "red", lty  = 2, lwd = 2)
+lines(density(aero_all$TERR), col = "black",lty = 3, lwd = 2)
+```
+
+Red is the subset, in black the distribution of the excluded measurements.
+
+How similar are the folds used for the spatial cross validation? (As they are from different areas, I expect to be differences here)
+
+```{r subset_folds}
+ggplot(aero,aes(x = TERR, group = fold, col = fold)) + geom_density(size=1)
+ggplot(aero,aes(x = X, y = Y, col = fold)) + geom_point()
+```
+
+And how does the variogram of the subset looks like?
+
+```{r subset_vrg}
+coordinates(aero) <- ~X+Y
+vrg <- variogram(LogTerr ~ GESTEINKL + LEG_TEK_1 + LC09_6 + rain, data = aero, boundaries = c(1,2,3,4,5,6,7,8,9,10,12,14,16,18,20,25,30,35,40,45,50))
+plot(vrg)
+rm(list = ls())
+```
+
+I do not compute envelopes here, as this would take some time. As we already saw earlier, the variogram looks kinda weird. We do not see the classical shape with a nice and clear correlation until some range. It is hard to interpret a variogram like this. Approaches such as non-stationary models are theoretically possible, but my understanding of spde's and inla is not good enough to implement such models while being confident about the implementation... Also it would need other assumptions about how e.g. the range varies spatially or how we allow for non-stationarity. The problem that the underlying model assumption regarding stationarity/non-stationarity is not met would probably remain anyway.
+
+I therefore think that pursuing such things as implementing non-stationarity or whatever else does only make sense if there is a clear motivation to it, e.g. adding a random effects for flights could help us dealing with the issue that the measurements depend on environmental conditions that we can assume to differ between flights, but being roughly stable among measurements of the same flight. (However, given the spatial component that random effect will have - the flights are implicitly indicating a very rough location - we currently do not plan to include it.)
+
+In the following, I present the performance measures and the computed models. 
+
+
+## Performance measures
+
+To measure the perfomance of models we look at different cross validation scores as well as on how well the model is able to fit the (training) data. 
+
+
+### Cross validation procedures
+
+I compute random cross validation based on a 70-30 split for training, resp. validation data. The same split is used for all  models. This cross validation is computed only once.
+
+I compute 4-fold spatial cross validation. Spatial blocks of 15x15km are randomly assigned to one of the four folds. This is done using the __blockCV_ package. The size of the blocks was chosen based on the distance of unique SNC-geocodes to the closest measurement. The model is computed four times, leaving out one of the four folds each time.
+
+
+
+### Performance scores applied
+
+Following performance measures are calculated:
+
+
+#### $RMSE$
+
+The root mean square error is calculated using the function __rmse__ from the package __Metrics__. It is defined as $$RMSE_{p,m} = \left[\sum_{1}^{N}(y_{p_{i}} - y_{m_{i}})^{2}\right]^{\frac{1}{2}}$$ where p stands for predicted and m for measured. 
+
+
+#### $R^{2}$
+
+The $R^{2}$ is equivalent to the square of the correlation between two variables. I will thus use
+```{r r_squared, include=TRUE, eval=FALSE}
+Rsquared <- cor(y_predicted, y_measured)^2
+```
+to compute the $R^{2}$.
+
+
+#### Continous ranked propensity score (CRPS)
+
+The crps is defined as $$crps(F,y) = \int_{-\infty}^{\infty}\left[F(x) - 1(x \geq y)\right]^{2}dx$$ where $F$ is the prediction and y the measurement.
+
+I assume that the predictions are gaussian distributed and use the package [scoringRules](https://cran.r-project.org/web/packages/scoringRules/vignettes/gettingstarted.html) to compute the crps.
+
+
+
+
+
+
+
+## Models
+
+In the following, I will briefly describe the used models.
+
+### Linear model (frequentist)
+
+The first model is a simple linear regression. $$ Y(s) =  \mathbf{\beta} \mathbf{X}$$ In all models considered, no intercept is used. The categories of GESTEINKL (variable for the lithology) is used to compute 5 intercepts for the 5 categories of the variable.
+
+### Linear Model (inla)
+
+The same model as above, but this time in a bayesian framework and fitted using INLA. For the coefficients, I use the default priors, which are Gaussian with mean 0 and precision 0.001.
+
+### pure correlated spatial random-effects
+
+The ambient dose rate from terrestrial radiation is modelled by a spatially correlated random-effects model. $$ Y(s) = \mu(s) + \epsilon$$ where $\mu(s)$ is a GRF with Matern covariance function. The model is computed in INLA using SPDE's. The chosen mesh has a cut-off for the edge length of minimum 3.5 km and maximum 5 km.
+
+For the hyperparameters, I choose to use PCpriors. The priors are specified by giving the prior probability probability of the parameter to be larger than a specific value. The used values are $$ P(range > 15) = 0.5 $$ and $$ P(sd > 1) = 0.01 $$. 
+
+### mixed-effects model
+
+The standard hierarchical spatial model used with INLA. $$ Y(s) = \beta X + \mu(s) + \epsilon $$ with $\mu(s)$ the same as above. Same mesh, priors and inference procedures as above except $$ P(sd > 10) = 0.01 $$. For the coefficients I use the default priors (same as for linear model in inla). 
+
+### two spatial processes model
+
+Motivated by the presence of a complex correlation structure, we discussed that a model with two spatial terms could be able to pick up signal at two spatial ranges, thus allowing to both capture short range variations as well as larger trends that help to predict into unobserved areas.
+
+The model looks like $$ Y(s) = \beta X + \mu_{1}(s) + \mu_{2}(s) + \epsilon $$ where $\mu_{1}(s)$ and $\mu_{2}(s)$ are both spatially correlated random effects with Matern covariance function.
+
+As this model cannot be directly fitted, we apply a reasoning known from General Additive Models. If $Y = A + B$ is the sketch of a model, then it is been shown that fitting $Y=A$, $Y-\tilde{Y_{A}} = B$, $Y-\tilde{Y_{B}} = A$ and continue iterating then $\tilde{Y} = \tilde{Y_{A}} + \tilde{Y_{B}}$ will converge to the solutions of fitting $Y = A+B$. The variance of the prediction under assumption of $A \perp B$ will be $Var(A+B) = Var(A) + Var(B)$. After the discussion with Reinhard, I changed the procedure to fit first the fixed-term effect (linear term with covariates), then the first spatial field seperately and finally the second spatial random-effect.
+
+The mesh for the coarser mesh is done with cutoff=3km and max.edge=5km. The dense mesh with 450m, resp. 600m. The PCpriors are chosen such that for $\mu_{1}$ $$ P(range > 20) = 0.5 $$ and $$ P(sd > 10) = 0.01 $$ and $$ P(range > 5) = 0.5 $$ and $$ P(sd > 10) = 0.01 $$ for $\mu_{2}$. For the coefficients I use again the default priors of inla.
+
+#### Convergence of model fit
+
+I ran 10 iterations to fit the model.
+
+For all models I use the default prior (gamma) for the precision of the gaussian observation. (The sd of the error term $\epsilon$.)
+
+I first look at the convergence with regard to the $R^{2}$ between the grid predictions of two subsequent iteration steps. I do this for the three model terms.
+
+```{r convergence_extended}
+# correlation to previous
+corlm <- readRDS("../Model_extended/Output/corlm.rds")
+coru1 <- readRDS("../Model_extended/Output/coru1.rds")
+coru2 <- readRDS("../Model_extended/Output/coru2.rds")
+df <- data.frame(t(rbind(corlm,coru1,coru2)))
+names(df) <- c("lm", "u1", "u2")
+plot(df$lm, type = "l", main = "convergence of model fitting", xlab = "iteration", ylab = "R2 to previous", ylim = c(0.97,1),xlim = c(2,15))
+lines(df$u1, type = "l", col = "blue")
+lines(df$u2, type = "l", col = "green")
+grid()
+legend("bottomright",legend = c("fixed effect","u1","u2"), col = c("black","blue","green"),pch = 19)
+
+```
+
+This does not look very promising. Especially compared to previous results. This can have different reasons. First, after discussion with Reinhard, I switched the iteration procedure to fit the lm-term and the first spatial field separately. However, that should not be an issue. Secondly, I recoded the script and thus there might be some issue, however, I was not able to figure out the problem so far.
+
+(I had to compute it twice, the first time I messed up the calculation of residuals in the script and had to correct.)
+
+UPDATE: after third round it finally seems I erased all major mistakes in the script. The convergence now looks nice. expecially the u1 field (large scale spatial correlation) seems to change most in first few iterations.
+
+Now I will look at the evolution of some hyperparameters and coefficients during the iteration. 
+
+```{r convergence_extended2}
+#coeffs
+df <- readRDS("../Model_extended/Output/results.rds")$fixed[,1]
+df <- cbind(df,readRDS("../Model_extended/Output/results_lm_it2.rds")$fixed[,1])
+df <- cbind(df,readRDS("../Model_extended/Output/results_lm_it3.rds")$fixed[,1])
+df <- cbind(df,readRDS("../Model_extended/Output/results_lm_it4.rds")$fixed[,1])
+df <- cbind(df,readRDS("../Model_extended/Output/results_lm_it5.rds")$fixed[,1])
+df <- cbind(df,readRDS("../Model_extended/Output/results_lm_it6.rds")$fixed[,1])
+df <- cbind(df,readRDS("../Model_extended/Output/results_lm_it7.rds")$fixed[,1])
+df <- cbind(df,readRDS("../Model_extended/Output/results_lm_it8.rds")$fixed[,1])
+df <- cbind(df,readRDS("../Model_extended/Output/results_lm_it9.rds")$fixed[,1])
+df <- cbind(df,readRDS("../Model_extended/Output/results_lm_it10.rds")$fixed[,1])
+# u1
+df <- readRDS("../Model_extended/Output/results_u1.rds")$hyperpar[,1]
+df <- cbind(df,readRDS("../Model_extended/Output/results_u1_it2.rds")$hyperpar[,1])
+df <- cbind(df,readRDS("../Model_extended/Output/results_u1_it3.rds")$hyperpar[,1])
+df <- cbind(df,readRDS("../Model_extended/Output/results_u1_it4.rds")$hyperpar[,1])
+df <- cbind(df,readRDS("../Model_extended/Output/results_u1_it5.rds")$hyperpar[,1])
+df <- cbind(df,readRDS("../Model_extended/Output/results_u1_it6.rds")$hyperpar[,1])
+df <- cbind(df,readRDS("../Model_extended/Output/results_u1_it7.rds")$hyperpar[,1])
+df <- cbind(df,readRDS("../Model_extended/Output/results_u1_it8.rds")$hyperpar[,1])
+df <- cbind(df,readRDS("../Model_extended/Output/results_u1_it9.rds")$hyperpar[,1])
+df <- cbind(df,readRDS("../Model_extended/Output/results_u1_it10.rds")$hyperpar[,1])
+# u2
+df <- readRDS("../Model_extended/Output/results_u2.rds")$hyperpar[,1]
+df <- cbind(df,readRDS("../Model_extended/Output/results_u2_it2.rds")$hyperpar[,1])
+df <- cbind(df,readRDS("../Model_extended/Output/results_u2_it3.rds")$hyperpar[,1])
+df <- cbind(df,readRDS("../Model_extended/Output/results_u2_it4.rds")$hyperpar[,1])
+df <- cbind(df,readRDS("../Model_extended/Output/results_u2_it5.rds")$hyperpar[,1])
+df <- cbind(df,readRDS("../Model_extended/Output/results_u2_it6.rds")$hyperpar[,1])
+df <- cbind(df,readRDS("../Model_extended/Output/results_u2_it7.rds")$hyperpar[,1])
+df <- cbind(df,readRDS("../Model_extended/Output/results_u2_it8.rds")$hyperpar[,1])
+df <- cbind(df,readRDS("../Model_extended/Output/results_u2_it9.rds")$hyperpar[,1])
+df <- cbind(df,readRDS("../Model_extended/Output/results_u2_it10.rds")$hyperpar[,1])
+
+```
+
+I still need to implement a nice visualization of the convergence, generally I can say:
+
+* Coefficients do change inbetween iterations, but not dramatically. The overall trend stays the same but contrasts between levels become smaller.
+* The range for u1 starts at 9 km and becomes larger over the iterative process. This is what we expected/hoped to see.
+* The range for u1 did not yet indicated stability at 19km. During revision process of the draft, I might recompute with more iteration steps. (I hope we do not observe convergence to the prior.....)
+* The range for u2 seems similar, but does not change that dramatically. u2 seems to pick up very short range correlations.
+
+## Results
+
+I will first look at resulting maps and uncertainty of the methods. The fitted coefficents I store in a separate object and disply them at the end of this section, together with the fitted hyperparameters.
+
+### Linear (frequentist)
+
+First, look at the map and uncertainty of the linear model. I will plot everything on the Logscale, but report predicted range and mean etc on the original scale
+
+```{r map_linear}
+grid <- readRDS("../Model_LM/Output/grid_results.rds")
+quilt.plot(grid$X,grid$Y,grid$mean,nlevel=25,nx=300,ny=200,asp=1,main="linear (freq) prediction")
+#no uncertainty predictions computed/extracted for this model....
+plot(density(exp(grid$mean[!is.na(grid$mean)])), main = "geogr. distr. predicted values (linear freq.)", xlab = "Terr Rad [nSv/h]")
+grid()
+quantile(exp(grid$mean),probs = c(0,0.025,0.05,0.1,0.25,0.5,0.75,0.9,0.95,0.975,0.99,1),na.rm=T)
+```
+
+Not displayed is the code to extract the coefficients.
+
+```{r coeffs_linear, echo = F, results=F,warning=F}
+res <- readRDS("../Model_LM/Output/results.rds")
+coeffs <- as.data.frame(cbind("category" = names(res$coefficients),"lm_freq" = res$coefficients))
+coeffs$lm_freq_sd <- summary(res)$coefficients[,2]
+```
+
+### Linear (inla)
+
+Now the same model in the bayesian framework, fitted with inla.
+
+```{r map_linear_inla}
+grid <- readRDS("../Model_LM_inla/Output/grid_results.rds")
+quilt.plot(grid$X,grid$Y,grid$mean,nlevel=25,nx=300,ny=200,asp=1,main="linear (inla) prediction")
+quilt.plot(grid$X,grid$Y,grid$sd,nlevel=15,nx=300,ny=200,asp=1,main = "linear (inla) sd")
+plot(density(exp(grid$mean)), main = "geogr. distr. predicted values (linear inla)", xlab = "Terr Rad [nSv/h]")
+grid()
+quantile(exp(grid$mean),probs = c(0,0.025,0.05,0.1,0.25,0.5,0.75,0.9,0.95,0.975,0.99,1),na.rm=T)
+```
+
+Again, the code to extract the coeffs is not displayed
+
+```{r coeff_linear_inla}
+res <- readRDS("../Model_LM_inla/Output/results.rds")
+coeffs$lm_inla <- res$summary.fixed[,1]
+coeffs$lm_inla_sd <- res$summary.fixed[,2]
+```
+
+
+### pure spatial 
+
+This model is a pure spatial random-effect ($Y(s) = \mu_{1}(s) + \epsilon(s)$).
+
+```{r map_spatial}
+grid <- readRDS("../Model_SPDE/Output/grid_results.rds")
+quilt.plot(grid$X,grid$Y,grid$mean,nlevel=25,nx=300,ny=200,asp=1,main="pure spatial prediction")
+quilt.plot(grid$X,grid$Y,grid$sd,nlevel=15,nx=300,ny=200,asp=1,main = "pure spatial sd")
+plot(density(exp(grid$mean)), main = "geogr. distr. predicted values (pure spatial)", xlab = "Terr Rad [nSv/h]")
+grid()
+quantile(exp(grid$mean),probs = c(0,0.025,0.05,0.1,0.25,0.5,0.75,0.9,0.95,0.975,0.99,1),na.rm=T)
+```
+
+I will look at the hyperparameters later in this script. This model does not have coefficients to be extracted.
+
+### mixed-effects
+
+Now I move to the standard spatial SPDE+INLA approach, which is a mixed-effects model with fixed-effect terms containning covariates and spatially correlated random-effect term.
+
+```{r map_mixed}
+grid <- readRDS("../Model_standard/Output/grid_results.rds")
+quilt.plot(grid$X,grid$Y,grid$mean,nlevel=25,nx=300,ny=200,asp=1,main="mixed effects prediction")
+quilt.plot(grid$X,grid$Y,grid$sd,nlevel=15,nx=300,ny=200,asp=1,main = "mixed effects sd")
+plot(density(exp(grid$mean)), main = "geogr. distr. predicted values (mixed effects)", xlab = "Terr Rad [nSv/h]")
+grid()
+quantile(exp(grid$mean),probs = c(0,0.025,0.05,0.1,0.25,0.5,0.75,0.9,0.95,0.975,0.99,1),na.rm=T)
+```
+
+Again, no display of the code to extract coefficents for later use... I will look at the hyperparameters later.
+
+```{r coeff_mixed}
+res <- readRDS("../Model_standard/Output/results.rds")
+coeffs$lm_mixed <- res$summary.fixed[,1]
+coeffs$lm_mixed_sd <- res$summary.fixed[,2]
+```
+
+### extended mixed-effects
+
+Now I move on to the last model. Here, we extended the previous mixed-effects model with a spatial term. As stated above, the model was iteratively fitted, with separate computations for the fixed term effect and each the two spatial random effects.
+
+```{r map_extended}
+grid <- readRDS("../Model_extended/Output/grid_results_it10.rds")
+quilt.plot(grid$X,grid$Y,(grid$mean_lm+grid$mean_u1+grid$mean_u2),nlevel=25,nx=300,ny=200,asp=1,main="extended prediction")
+quilt.plot(grid$X,grid$Y,sqrt(grid$sd_lm^2 + grid$sd_u1^2 + grid$sd_u2^2),nlevel=15,nx=300,ny=200,asp=1,main = "extended sd")
+plot(density(exp(grid$mean_lm+grid$mean_u1+grid$mean_u2)), main = "geogr. distr. predicted values (extended)", xlab = "Terr Rad [nSv/h]")
+grid()
+quantile(exp(grid$mean_lm + grid$mean_u1 + grid$mean_u2),probs = c(0,0.025,0.05,0.1,0.25,0.5,0.75,0.9,0.95,0.975,0.99,1),na.rm=T)
+```
+
+Again, no display of the code to extract coefficents for later use.
+
+```{r coeff_extended}
+res <- readRDS("../Model_extended/Output/results_lm_it10.rds")
+coeffs$lm_extended <- res$fixed[,1]
+coeffs$lm_extended_sd <- res$fixed[,2]
+```
+
+## fitted coefficients
+
+Now I will compare the fitted coefficients.
+
+```{r coeffs_compare}
+coeffs_mean <- coeffs[,c("category","lm_freq","lm_inla","lm_mixed")]
+coeffs_mean <- gather(coeffs_mean, key = "model", value = "coefficient",-c("category"))
+coeffs_mean$coefficient <- as.numeric(coeffs_mean$coefficient)
+ggplot(coeffs_mean, aes(x = category, y = coefficient, col = model))+geom_point()+coord_flip()
+
+```
+
+It seems that the contrast between the categorical levels is smaller for the spatial models. Part of the contrast seems to be taken up by the spatial term.
+
+### fitted Hyperparameters
+
+Now I will have a look at the fitted hyperparameters. These include the sd of the white noise term as well as the range and the sd of the GRFs.
+
+```{r hyperpars_extract, echo = F,warning=F,results=F,message=F}
+#to be done
+#init dataframe
+df <- c("Model" = NA,"sd_epsilon" = NA, "range" = NA, "sd_field" = NA)
+df <- data.frame(t(df))
+#sd epsilon lm
+res <- readRDS("../Model_LM_inla/Output/results.rds")
+df[1,] <- c("lm_inla", res$summary.hyperpar[,1],NA,NA)
+df <- rbind(df, c("lm_inla_sd", res$summary.hyperpar[,2],NA,NA))
+#pure spatial
+res <- readRDS("../Model_SPDE/Output/results.rds")
+df <- rbind(df,c("pure_spatial", res$summary.hyperpar[1,1], res$summary.hyperpar[2,1], res$summary.hyperpar[3,1]))
+df <- rbind(df,c("pure_spatial_sd", res$summary.hyperpar[1,2], res$summary.hyperpar[2,2], res$summary.hyperpar[3,2]))
+#mixed
+res <- readRDS("../Model_standard/Output/results.rds")
+df <- rbind(df,c("mixed_effect", res$summary.hyperpar[1,1], res$summary.hyperpar[2,1], res$summary.hyperpar[3,1]))
+df <- rbind(df,c("mixed_effect_sd", res$summary.hyperpar[1,2], res$summary.hyperpar[2,2], res$summary.hyperpar[3,2]))
+#extended lm
+res <- readRDS("../Model_extended/Output/results_lm_it10.rds")
+df <- rbind(df, c("extend_lm", res$hyperpar[,1],NA,NA))
+df <- rbind(df, c("extend_lm_sd", res$hyperpar[,2],NA,NA))
+#extended u1
+res <- readRDS("../Model_extended/Output/results_u1_it10.rds")
+df <- rbind(df,c("extend_u1", res$hyperpar[1,1], res$hyperpar[2,1], res$hyperpar[3,1]))
+df <- rbind(df,c("extend_u1_sd", res$hyperpar[1,2], res$hyperpar[2,2], res$hyperpar[3,2]))
+#extended u2
+res <- readRDS("../Model_extended/Output/results_u2_it10.rds")
+df <- rbind(df,c("extend_u2", res$hyperpar[1,1], res$hyperpar[2,1], res$hyperpar[3,1]))
+df <- rbind(df,c("extend_u2_sd", res$hyperpar[1,2], res$hyperpar[2,2], res$hyperpar[3,2]))
+```
+
+```{r hyperpars_display}
+#do table of hyperpars
+kable(df)
+rm(list = ls())
+```
+
+
+
+## Model performances
+
+I first create a dataframe to store the performance results.
+
+```{r init_df, results=F}
+performances <- data.frame(t(rep(NA,8)))
+names(performances) <- c("model", "RMSEtrain","RMSErCV","RMSEspCV","R2train","R2rCV","R2spCV","CRPSspCV")
+```
+
+
+### Linear model (frequentist)
+
+```{r lmf_load, include=FALSE}
+grid <- readRDS("../Model_LM/Output/grid_results.rds")
+fit <- readRDS("../Model_LM/Output/aero_results.rds")
+validr <- readRDS("../Model_LM/CVr/Output/validr.rds")
+valid1 <- readRDS("../Model_LM/CV1/Output/valid1.rds")
+valid2 <- readRDS("../Model_LM/CV2/Output/valid2.rds")
+valid3 <- readRDS("../Model_LM/CV3/Output/valid3.rds")
+valid4 <- readRDS("../Model_LM/CV4/Output/valid4.rds")
+```
+
+```{r lmf_performance}
+RMSEtrain <- rmse(actual = fit$TERR, predicted = exp(fit$mean))
+RMSErCV <- rmse(actual = validr$TERR, predicted = exp(validr$mean))
+RMSEspCV <- rmse(actual = c(valid1$TERR, valid2$TERR[!is.na(valid2$mean)], valid3$TERR, valid4$TERR),
+                 predicted = exp(c(valid1$mean, valid2$mean[!is.na(valid2$mean)], valid3$mean, valid4$mean)))
+R2train <- cor(fit$TERR, exp(fit$mean))^2
+R2rCV <- cor(validr$TERR, exp(validr$mean))^2
+R2spCV <- cor(c(valid1$TERR, valid2$TERR[!is.na(valid2$mean)], valid3$TERR, valid4$TERR),
+              exp(c(valid1$mean, valid2$mean[!is.na(valid2$mean)], valid3$mean, valid4$mean)))^2
+# CRPSspCV - I did not extract uncertainty on predictions, thus will not compute crps
+```
+
+```{r lmf_add2df, echo=FALSE}
+performances[1,] <- c("lM_frequentist", RMSEtrain,RMSErCV,RMSEspCV,R2train,R2rCV,R2spCV,NA)
+performances[1,]
+```
+
+
+
+### Linear Model (inla)
+
+
+```{r lminla_load, include=FALSE}
+grid <- readRDS("../Model_LM_inla/Output/grid_results.rds")
+fit <- readRDS("../Model_LM_inla/Output/aero_results.rds")
+validr <- readRDS("../Model_LM_inla/CVr/Output/valid_results_cvr.rds")
+valid1 <- readRDS("../Model_LM_inla/CV1/Output/valid_results_cv1.rds")
+valid2 <- readRDS("../Model_LM_inla/CV2/Output/valid_results_cv2.rds")
+valid3 <- readRDS("../Model_LM_inla/CV3/Output/valid_results_cv3.rds")
+valid4 <- readRDS("../Model_LM_inla/CV4/Output/valid_results_cv4.rds")
+```
+
+```{r lminla_performance}
+RMSEtrain <- rmse(actual = fit$TERR, predicted = exp(fit$mean))
+RMSErCV <- rmse(actual = validr$TERR, predicted = exp(validr$mean))
+RMSEspCV <- rmse(actual = c(valid1$TERR, valid2$TERR[!is.na(valid2$mean)], valid3$TERR, valid4$TERR),
+                 predicted = exp(c(valid1$mean, valid2$mean[!is.na(valid2$mean)], valid3$mean, valid4$mean)))
+R2train <- cor(fit$TERR, exp(fit$mean))^2
+R2rCV <- cor(validr$TERR, exp(validr$mean))^2
+R2spCV <- cor(c(valid1$TERR, valid2$TERR[!is.na(valid2$mean)], valid3$TERR, valid4$TERR),
+              exp(c(valid1$mean, valid2$mean[!is.na(valid2$mean)], valid3$mean, valid4$mean)))^2
+valid <- rbind(valid1,valid2,valid3,valid4)
+CRPSspCV <- mean(crps(y = valid$LogTerr, family = "normal", mean = valid$mean, sd = valid$sd)) #on log-scale
+```
+
+```{r lminla_add2df, echo=FALSE}
+performances[2,] <- c("lM_inla", RMSEtrain,RMSErCV,RMSEspCV,R2train,R2rCV,R2spCV,CRPSspCV)
+performances[2,]
+```
+
+
+
+### pure correlated spatial random-effects
+
+```{r pure_sp_load, include=FALSE}
+grid <- readRDS("../Model_SPDE/Output/grid_results.rds")
+fit <- readRDS("../Model_SPDE/Output/aero_results.rds")
+validr <- readRDS("../Model_SPDE/CVr/Output/valid_results_cvr.rds")
+valid1 <- readRDS("../Model_SPDE/CV1/Output/valid_results_cv1.rds")
+valid2 <- readRDS("../Model_SPDE/CV2/Output/valid_results_cv2.rds")
+valid3 <- readRDS("../Model_SPDE/CV3/Output/valid_results_cv3.rds")
+valid4 <- readRDS("../Model_SPDE/CV4/Output/valid_results_cv4.rds")
+```
+
+```{r pure_sp_performance}
+RMSEtrain <- rmse(actual = fit$TERR, predicted = exp(fit$mean))
+RMSErCV <- rmse(actual = validr$TERR, predicted = exp(validr$mean))
+RMSEspCV <- rmse(actual = c(valid1$TERR, valid2$TERR[!is.na(valid2$mean)], valid3$TERR, valid4$TERR),
+                 predicted = exp(c(valid1$mean, valid2$mean[!is.na(valid2$mean)], valid3$mean, valid4$mean)))
+R2train <- cor(fit$TERR, exp(fit$mean))^2
+R2rCV <- cor(validr$TERR, exp(validr$mean))^2
+R2spCV <- cor(c(valid1$TERR, valid2$TERR[!is.na(valid2$mean)], valid3$TERR, valid4$TERR),
+              exp(c(valid1$mean, valid2$mean[!is.na(valid2$mean)], valid3$mean, valid4$mean)))^2
+valid <- rbind(valid1,valid2,valid3,valid4)
+CRPSspCV <- mean(crps(y = valid$LogTerr, family = "normal", mean = valid$mean, sd = valid$sd)) #on log-scale
+```
+
+```{r pure_sp_add2df, echo=FALSE}
+performances[3,] <- c("pure_spatial", RMSEtrain,RMSErCV,RMSEspCV,R2train,R2rCV,R2spCV,CRPSspCV)
+performances[3,]
+```
+
+```{r pure_sp_plot, echo=FALSE}
+rm(grid,validr,valid1,valid2,valid3,valid4,fit,RMSEtrain,RMSErCV,RMSEspCV,R2train,R2rCV,R2spCV,CRPSspCV)
+```
+
+
+
+
+### mixed-effects model
+
+
+```{r mixedeffects_load, include=FALSE}
+grid <- readRDS("../Model_standard/Output/grid_results.rds")
+fit <- readRDS("../Model_standard/Output/aero_results.rds")
+validr <- readRDS("../Model_standard/CVr/Output/valid_results_cvr.rds")
+valid1 <- readRDS("../Model_standard/CV1/Output/valid_results_cv1.rds")
+valid2 <- readRDS("../Model_standard/CV2/Output/valid_results_cv2.rds")
+valid3 <- readRDS("../Model_standard/CV3/Output/valid_results_cv3.rds")
+valid4 <- readRDS("../Model_standard/CV4/Output/valid_results_cv4.rds")
+```
+
+```{r mixedeffects_performance}
+RMSEtrain <- rmse(actual = fit$TERR, predicted = exp(fit$mean))
+RMSErCV <- rmse(actual = validr$TERR, predicted = exp(validr$mean))
+RMSEspCV <- rmse(actual = c(valid1$TERR, valid2$TERR[!is.na(valid2$mean)], valid3$TERR, valid4$TERR),
+                 predicted = exp(c(valid1$mean, valid2$mean[!is.na(valid2$mean)], valid3$mean, valid4$mean)))
+R2train <- cor(fit$TERR, exp(fit$mean))^2
+R2rCV <- cor(validr$TERR, exp(validr$mean))^2
+R2spCV <- cor(c(valid1$TERR, valid2$TERR[!is.na(valid2$mean)], valid3$TERR, valid4$TERR),
+              exp(c(valid1$mean, valid2$mean[!is.na(valid2$mean)], valid3$mean, valid4$mean)))^2
+valid <- rbind(valid1,valid2,valid3,valid4)
+CRPSspCV <- mean(crps(y = valid$LogTerr, family = "normal", mean = valid$mean, sd = valid$sd)) #on log-scale
+```
+
+```{r mixedeffects_add2df, echo=FALSE}
+performances[4,] <- c("mixed-effects", RMSEtrain,RMSErCV,RMSEspCV,R2train,R2rCV,R2spCV,CRPSspCV)
+performances[4,]
+```
+
+```{r mixedeffects_plot, echo=FALSE}
+rm(grid,validr,valid1,valid2,valid3,valid4,fit,RMSEtrain,RMSErCV,RMSEspCV,R2train,R2rCV,R2spCV,CRPSspCV)
+```
+
+
+
+### two spatial processes model
+
+#### Performance after 8 iterations
+
+```{r 2sp_load, include=FALSE}
+grid <- readRDS("../Model_extended/Output/grid_results_it10.rds")
+fit <- readRDS("../Model_extended/Output/aero_results_it10.rds")
+validr <- readRDS("../Model_extended/CVr/Output/valid_results_it10.rds") 
+valid1 <- readRDS("../Model_extended/CV1/Output/valid_results_it10.rds")
+valid2 <- readRDS("../Model_extended/CV2/Output/valid_results_it10.rds")
+valid3 <- readRDS("../Model_extended/CV3/Output/valid_results_it10.rds")
+valid4 <- readRDS("../Model_extended/CV4/Output/valid_results_it10.rds")
+valid <- rbind(valid1,valid2,valid3,valid4)
+valid$pred <- valid$mean_lm+valid$mean_u1+valid$mean_u2
+valid$sd <- sqrt(valid$sd_lm^2+valid$sd_u1^2+valid$sd_u2^2)
+validr$pred <- validr$mean_lm+validr$mean_u1+validr$mean_u2
+validr$sd <- sqrt(validr$sd_lm^2+validr$sd_u1^2+validr$sd_u2^2)
+```
+
+```{r 2sp_performance}
+RMSEtrain <- rmse(actual = fit$TERR, predicted = exp(fit$mean_lm+fit$mean_u1+fit$mean_u2))
+RMSErCV <- rmse(actual = validr$TERR, predicted = exp(validr$pred))
+RMSEspCV <- rmse(actual = valid$TERR,
+                 predicted = exp(valid$pred))
+R2train <- cor(fit$TERR, exp(fit$mean_lm+fit$mean_u1+fit$mean_u2))^2
+R2rCV <- cor(validr$TERR, exp(validr$pred))^2
+R2spCV <- cor(valid$TERR,exp(valid$pred))^2
+CRPSspCV <- mean(crps(y = valid$LogTerr, family = "normal", mean = valid$pred, sd = valid$sd)) #on log-scale
+```
+
+```{r 2sp_add2df, echo=FALSE}
+performances[5,] <- c("2spatial_processes", RMSEtrain,RMSErCV,RMSEspCV,R2train,R2rCV,R2spCV,CRPSspCV)
+performances[5,]
+```
+
+```{r 2sp_plot, echo=FALSE}
+#rm(grid,validr,valid1,valid2,valid3,valid4,fit,RMSEtrain,RMSErCV,RMSEspCV,R2train,R2rCV,R2spCV,CRPSspCV)
+```
+
+
+## Summary
+
+I now look at the performances of the maps: (data: fit of measured values, grid:predictions on 1x1km grid)
+
+```{r performance}
+kable(performances)
+```
+
+Regarding spatial cross validation, there is no clear winner. All models seem to perform quite bad in predicting into unobserved areas. However, the linear models are not much better in random cross validation and fitting of training data than prediction. They generally are not able to pick up much of the variation. Models including a spatial term are able to more flexibly fit the local variations in background radiation. It however seems that the spatial correlation does not help much in getting better performance scores on the spatial cross validation. May be the 15km block are too restrictive regarding the spatial processes at work. (However, looking at the gaps in coverage and the spatial folds, the task seems a quite realistic measure for the model performance)
+
+The results of the extended model perform best in all validation and goodness of fit measures. I suspect the high $R^{2}$ for the training data could indicate some overfitting. (and difference to $R^{2}$ of random cross validation is larger than for other models...)
+
+Choosing a model should, I would argue, be based on both spatial cross validation as well as goodness of fit, resp. random cross validation. The extended model performs best in both aspects, but might be overfitting the training data to some degree.  
+
+
+
+
+
+

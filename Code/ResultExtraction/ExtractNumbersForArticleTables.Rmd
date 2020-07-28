@@ -1,0 +1,294 @@
+---
+title: "TablesForArticle"
+author: "Folly Christophe"
+date: "19 6 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load packages, results=F, warning=FALSE, message=FALSE, include=FALSE}
+library(INLA)
+library(Metrics)
+library(fields)
+library(tidyverse)
+library(ggplot2)
+library(scoringRules)
+library(knitr)
+library(gstat)
+library(sp)
+library(MatrixModels)
+library(kableExtra)
+```
+
+## Introduction
+
+Extract and display numbers and tables to be included in the article on the map.
+
+## Tables
+
+### Hyperpars
+
+```{r hyperpars_extract}
+#to be done
+#init dataframe
+df <- c("Model" = NA,"sd_epsilon" = NA, "range" = NA, "sd_field" = NA)
+df <- data.frame(t(df))
+#sd epsilon lm
+res_lm <- readRDS("../Model_LM_inla/Output/results.rds")
+df[1,] <- c("lm_inla", res_lm$summary.hyperpar[,1],NA,NA)
+df <- rbind(df, c("lm_inla_sd", res_lm$summary.hyperpar[,2],NA,NA))
+#pure spatial
+res_sp <- readRDS("../Model_SPDE/Output/results.rds")
+df <- rbind(df,c("pure_spatial", res_sp$summary.hyperpar[1,1], res_sp$summary.hyperpar[2,1], res_sp$summary.hyperpar[3,1]))
+df <- rbind(df,c("pure_spatial_sd", res_sp$summary.hyperpar[1,2], res_sp$summary.hyperpar[2,2], res_sp$summary.hyperpar[3,2]))
+#mixed
+res_me <- readRDS("../Model_standard/Output/results.rds")
+df <- rbind(df,c("mixed_effect", res_me$summary.hyperpar[1,1], res_me$summary.hyperpar[2,1], res_me$summary.hyperpar[3,1]))
+df <- rbind(df,c("mixed_effect_sd", res_me$summary.hyperpar[1,2], res_me$summary.hyperpar[2,2], res_me$summary.hyperpar[3,2]))
+#extended lm
+res_eme <- readRDS("../Model_extended_priors/Main/Output/results.rds")
+res_eme$summary.hyperpar[,1:2]
+```
+
+```{r hyperpars_display}
+#do table of hyperpars
+kable(df)
+```
+
+### Coefficients
+
+```{r coeffs}
+df2 <- as.data.frame(cbind(rownames(res_lm$summary.fixed) ,res_lm$summary.fixed[,1:2], res_me$summary.fixed[,1:2], res_eme$summary.fixed[,1:2]))
+names(df2) <- c("Cov", "lm_mean", "lm_sd", "me_mean", "me_sd", "eme_mean", "eme_sd")
+df2
+```
+
+
+### CV scores
+
+I first create a dataframe to store the performance results.
+
+```{r init_df, results=F}
+performances <- data.frame(t(rep(NA,9)))
+names(performances) <- c("model", "RMSEtrain","RMSErCV","RMSEspCV","R2train","R2rCV","R2spCV","CRPSrCV","CRPSspCV")
+```
+
+#### Linear Model (inla)
+
+
+```{r lminla_load}
+grid <- readRDS("../Model_LM_inla/Output/grid_results.rds")
+fit <- readRDS("../Model_LM_inla/Output/aero_results.rds")
+validr <- readRDS("../Model_LM_inla/CVr/Output/valid_results_cvr.rds")
+valid1 <- readRDS("../Model_LM_inla/CV1/Output/valid_results_cv1.rds")
+valid2 <- readRDS("../Model_LM_inla/CV2/Output/valid_results_cv2.rds")
+valid3 <- readRDS("../Model_LM_inla/CV3/Output/valid_results_cv3.rds")
+valid4 <- readRDS("../Model_LM_inla/CV4/Output/valid_results_cv4.rds")
+
+#performance
+RMSEtrain <- rmse(actual = fit$TERR, predicted = exp(fit$mean))
+RMSErCV <- rmse(actual = validr$TERR, predicted = exp(validr$mean))
+RMSEspCV <- rmse(actual = c(valid1$TERR, valid2$TERR[!is.na(valid2$mean)], valid3$TERR, valid4$TERR),
+                 predicted = exp(c(valid1$mean, valid2$mean[!is.na(valid2$mean)], valid3$mean, valid4$mean)))
+R2train <- cor(fit$TERR, exp(fit$mean))^2
+R2rCV <- cor(validr$TERR, exp(validr$mean))^2
+R2spCV <- cor(c(valid1$TERR, valid2$TERR[!is.na(valid2$mean)], valid3$TERR, valid4$TERR),
+              exp(c(valid1$mean, valid2$mean[!is.na(valid2$mean)], valid3$mean, valid4$mean)))^2
+valid <- rbind(valid1,valid2,valid3,valid4)
+CRPSspCV <- mean(crps(y = valid$LogTerr, family = "normal", mean = valid$mean, sd = valid$sd)) #on log-scale
+CRPSrCV <- mean(crps(y = validr$LogTerr, family = "normal", mean = validr$mean, sd = validr$sd))
+
+#add
+performances[1,] <- c("lM_inla", RMSEtrain,RMSErCV,RMSEspCV,R2train,R2rCV,R2spCV,CRPSrCV, CRPSspCV)
+performances[1,]
+```
+
+
+#### pure correlated spatial random-effects
+
+```{r pure_sp_load}
+grid <- readRDS("../Model_SPDE/Output/grid_results.rds")
+fit <- readRDS("../Model_SPDE/Output/aero_results.rds")
+validr <- readRDS("../Model_SPDE/CVr/Output/valid_results_cvr.rds")
+valid1 <- readRDS("../Model_SPDE/CV1/Output/valid_results_cv1.rds")
+valid2 <- readRDS("../Model_SPDE/CV2/Output/valid_results_cv2.rds")
+valid3 <- readRDS("../Model_SPDE/CV3/Output/valid_results_cv3.rds")
+valid4 <- readRDS("../Model_SPDE/CV4/Output/valid_results_cv4.rds")
+
+#compute perf
+RMSEtrain <- rmse(actual = fit$TERR, predicted = exp(fit$mean))
+RMSErCV <- rmse(actual = validr$TERR, predicted = exp(validr$mean))
+RMSEspCV <- rmse(actual = c(valid1$TERR, valid2$TERR[!is.na(valid2$mean)], valid3$TERR, valid4$TERR),
+                 predicted = exp(c(valid1$mean, valid2$mean[!is.na(valid2$mean)], valid3$mean, valid4$mean)))
+R2train <- cor(fit$TERR, exp(fit$mean))^2
+R2rCV <- cor(validr$TERR, exp(validr$mean))^2
+R2spCV <- cor(c(valid1$TERR, valid2$TERR[!is.na(valid2$mean)], valid3$TERR, valid4$TERR),
+              exp(c(valid1$mean, valid2$mean[!is.na(valid2$mean)], valid3$mean, valid4$mean)))^2
+valid <- rbind(valid1,valid2,valid3,valid4)
+CRPSspCV <- mean(crps(y = valid$LogTerr, family = "normal", mean = valid$mean, sd = valid$sd)) #on log-scale
+CRPSrCV <- mean(crps(y = validr$LogTerr, family = "normal", mean = validr$mean, sd = validr$sd))
+
+#add
+performances[2,] <- c("pure_spatial", RMSEtrain,RMSErCV,RMSEspCV,R2train,R2rCV,R2spCV,CRPSrCV, CRPSspCV)
+performances[2,]
+
+rm(grid,validr,valid1,valid2,valid3,valid4,fit,RMSEtrain,RMSErCV,RMSEspCV,R2train,R2rCV,R2spCV,CRPSspCV)
+```
+
+### mixed-effects model
+
+```{r mixedeffects_load}
+grid <- readRDS("../Model_standard/Output/grid_results.rds")
+fit <- readRDS("../Model_standard/Output/aero_results.rds")
+validr <- readRDS("../Model_standard/CVr/Output/valid_results_cvr.rds")
+valid1 <- readRDS("../Model_standard/CV1/Output/valid_results_cv1.rds")
+valid2 <- readRDS("../Model_standard/CV2/Output/valid_results_cv2.rds")
+valid3 <- readRDS("../Model_standard/CV3/Output/valid_results_cv3.rds")
+valid4 <- readRDS("../Model_standard/CV4/Output/valid_results_cv4.rds")
+
+#comp perf
+RMSEtrain <- rmse(actual = fit$TERR, predicted = exp(fit$mean))
+RMSErCV <- rmse(actual = validr$TERR, predicted = exp(validr$mean))
+RMSEspCV <- rmse(actual = c(valid1$TERR, valid2$TERR[!is.na(valid2$mean)], valid3$TERR, valid4$TERR),
+                 predicted = exp(c(valid1$mean, valid2$mean[!is.na(valid2$mean)], valid3$mean, valid4$mean)))
+R2train <- cor(fit$TERR, exp(fit$mean))^2
+R2rCV <- cor(validr$TERR, exp(validr$mean))^2
+R2spCV <- cor(c(valid1$TERR, valid2$TERR[!is.na(valid2$mean)], valid3$TERR, valid4$TERR),
+              exp(c(valid1$mean, valid2$mean[!is.na(valid2$mean)], valid3$mean, valid4$mean)))^2
+valid <- rbind(valid1,valid2,valid3,valid4)
+CRPSspCV <- mean(crps(y = valid$LogTerr, family = "normal", mean = valid$mean, sd = valid$sd)) #on log-scale
+CRPSrCV <- mean(crps(y = validr$LogTerr, family = "normal", mean = validr$mean, sd = validr$sd))
+
+#add
+performances[3,] <- c("mixed-effects", RMSEtrain,RMSErCV,RMSEspCV,R2train,R2rCV,R2spCV,CRPSrCV, CRPSspCV)
+performances[3,]
+
+rm(grid,validr,valid1,valid2,valid3,valid4,fit,RMSEtrain,RMSErCV,RMSEspCV,R2train,R2rCV,R2spCV,CRPSspCV)
+```
+
+#### extended mixed effects
+
+```{r perf_ext_me}
+#load informative prior
+grid <- readRDS("../Model_extended_priors/Main/Output/grid_results.rds")
+fit <- readRDS("../Model_extended_priors/Main/Output/aero_results.rds")
+validr <- readRDS("../Model_extended_priors/CVr/Output/valid_results_cvr.rds") 
+valid1 <- readRDS("../Model_extended_priors/CV1/Output/valid_results_cv1.rds")
+valid2 <- readRDS("../Model_extended_priors/CV2/Output/valid_results_cv2.rds")
+valid3 <- readRDS("../Model_extended_priors/CV3/Output/valid_results_cv3.rds")
+valid4 <- readRDS("../Model_extended_priors/CV4/Output/valid_results_cv4.rds")
+valid <- rbind(valid1,valid2,valid3,valid4)
+valid$pred <- valid$mean
+valid$sd <- valid$sd
+validr$pred <- validr$mean
+validr$sd <- validr$sd
+
+# performance iterative
+RMSEtrain <- rmse(actual = fit$TERR, predicted = exp(fit$mean))
+RMSErCV <- rmse(actual = validr$TERR, predicted = exp(validr$pred))
+RMSEspCV <- rmse(actual = valid$TERR,
+                 predicted = exp(valid$pred))
+R2train <- cor(fit$TERR, exp(fit$mean))^2
+R2rCV <- cor(validr$TERR, exp(validr$pred))^2
+R2spCV <- cor(valid$TERR,exp(valid$pred))^2
+CRPSspCV <- mean(crps(y = valid$LogTerr, family = "normal", mean = valid$pred, sd = valid$sd)) #on log-scale 
+CRPSrCV <- mean(crps(y = validr$LogTerr, family = "normal", mean = validr$mean, sd = validr$sd))
+
+#add
+#add
+performances[4,] <- c("extended mixed-effects", RMSEtrain,RMSErCV,RMSEspCV,R2train,R2rCV,R2spCV,CRPSrCV, CRPSspCV)
+performances[4,]
+
+```
+
+```{r performances}
+performances
+```
+
+## Additional numbers
+
+```{r clean_ws1}
+rm(list=ls())
+```
+
+### Number of mesh nodes sensitivity 
+
+```{r meshnodes}
+#extended
+readRDS("../Model_extended_priors/Output/mesh_u1.rds")$n
+readRDS("../Model_extended_priors/Output/mesh_u2.rds")$n
+#sensitivity denser
+readRDS("../Model_extended_priors_sensitivity_meshsmall/Output/mesh_u1.rds")$n
+readRDS("../Model_extended_priors_sensitivity_meshsmall/Output/mesh_u2.rds")$n
+#sensitivity less dense
+readRDS("../Model_extended_priors_sensitivity_meshlarge/Output/mesh_u1.rds")$n
+readRDS("../Model_extended_priors_sensitivity_meshlarge/Output/mesh_u2.rds")$n
+```
+
+### Overview Number of Measurements by category (total and included)
+
+```{r measurements by category}
+# ====  measurements included
+data <- readRDS("../Model_extended_priors/Input/aero_cluster.rds")
+
+#litho
+data %>% group_by(GESTEINKL) %>% summarise("N" = n(), "mean" = mean(TERR), "min" = quantile(TERR, probs = c(0)), "25q" = quantile(TERR, probs = c(0.25)), "median" = quantile(TERR, probs = c(0.5)), "75q" = quantile(TERR, probs = c(0.75)), max = quantile(TERR, probs = c(1)))
+
+#tecto
+data %>% group_by(LEG_TEK_1) %>% summarise("N" = n(), "mean" = mean(TERR), "min" = quantile(TERR, probs = c(0)), "25q" = quantile(TERR, probs = c(0.25)), "median" = quantile(TERR, probs = c(0.5)), "75q" = quantile(TERR, probs = c(0.75)), max = quantile(TERR, probs = c(1)))
+
+#lc
+data %>% group_by(LC09_6) %>% summarise("N" = n(), "mean" = mean(TERR), "min" = quantile(TERR, probs = c(0)), "25q" = quantile(TERR, probs = c(0.25)), "median" = quantile(TERR, probs = c(0.5)), "75q" = quantile(TERR, probs = c(0.75)), max = quantile(TERR, probs = c(1)))
+
+
+
+# ====  excluded data
+library(sf)
+data <- st_set_geometry(readRDS("../Model_extended_priors/Input/excluded_measurements.rds"),NULL)
+
+#litho
+data %>% group_by(GESTEINKL) %>% summarise("N" = n(), "mean" = mean(TERR), "min" = quantile(TERR, probs = c(0)), "25q" = quantile(TERR, probs = c(0.25)), "median" = quantile(TERR, probs = c(0.5)), "75q" = quantile(TERR, probs = c(0.75)), max = quantile(TERR, probs = c(1)))
+
+#tecto
+data %>% group_by(LEG_TEK_1) %>% summarise("N" = n(), "mean" = mean(TERR), "min" = quantile(TERR, probs = c(0)), "25q" = quantile(TERR, probs = c(0.25)), "median" = quantile(TERR, probs = c(0.5)), "75q" = quantile(TERR, probs = c(0.75)), max = quantile(TERR, probs = c(1)))
+
+#lc
+data %>% group_by(LC09_6) %>% summarise("N" = n(), "mean" = mean(TERR), "min" = quantile(TERR, probs = c(0)), "25q" = quantile(TERR, probs = c(0.25)), "median" = quantile(TERR, probs = c(0.5)), "75q" = quantile(TERR, probs = c(0.75)), max = quantile(TERR, probs = c(1)))
+
+
+# ==== all afgter cleaning
+data <- rbind(st_set_geometry(readRDS("../Model_extended_priors/Input/excluded_measurements.rds"),NULL)[,c("TERR","GESTEINKL","LEG_TEK_1","LC09_6")],readRDS("../Model_extended_priors/Input/aero_cluster.rds")[,c("TERR","GESTEINKL","LEG_TEK_1","LC09_6")])
+
+#litho
+data %>% group_by(GESTEINKL) %>% summarise("N" = n(), "mean" = mean(TERR), "min" = quantile(TERR, probs = c(0)), "25q" = quantile(TERR, probs = c(0.25)), "median" = quantile(TERR, probs = c(0.5)), "75q" = quantile(TERR, probs = c(0.75)), max = quantile(TERR, probs = c(1)))
+
+#tecto
+data %>% group_by(LEG_TEK_1) %>% summarise("N" = n(), "mean" = mean(TERR), "min" = quantile(TERR, probs = c(0)), "25q" = quantile(TERR, probs = c(0.25)), "median" = quantile(TERR, probs = c(0.5)), "75q" = quantile(TERR, probs = c(0.75)), max = quantile(TERR, probs = c(1)))
+
+#lc
+data %>% group_by(LC09_6) %>% summarise("N" = n(), "mean" = mean(TERR), "min" = quantile(TERR, probs = c(0)), "25q" = quantile(TERR, probs = c(0.25)), "median" = quantile(TERR, probs = c(0.5)), "75q" = quantile(TERR, probs = c(0.75)), max = quantile(TERR, probs = c(1)))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
