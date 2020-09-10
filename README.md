@@ -6,7 +6,7 @@ This repository contains:
     - Variable Pred_logTerr: posterior mean, on log-scale
     - Variable Unc_logTerr: posterior standard deviation
  - 100 realisations from the joint posterior, delivered in 4 seperate shapefiles.
-    - Variables sample_i: realisation i, with i in 1:100
+    - Variables sample_i: realisation i, with i in 1:100, unit is nSv/h
  - the R Code used to generate the map.
  
 Reference:
