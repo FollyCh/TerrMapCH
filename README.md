@@ -9,6 +9,6 @@ This repository contains:
     - Variables sample_i: realisation i, with i in 1:100, unit is nSv/h
  - the R Code used to generate the map.
  
-Reference: [arXiv:2010.00534]{arXiv:2010.00534} 
+Reference: [arXiv:2010.00534](arXiv:2010.00534) 
 
 
